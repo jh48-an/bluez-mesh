@@ -24,7 +24,8 @@
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
-
+#include <ell/ell.h>
+#include "src/shared/shell.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
@@ -247,161 +248,23 @@ bool mesh_crypto_aes_ccm_encrypt(const uint8_t nonce[13], const uint8_t key[16],
 					uint8_t *out_msg, void *out_mic,
 					size_t mic_size)
 {
-	uint8_t pmsg[16], cmic[16], cmsg[16];
-	uint8_t mic[16], Xn[16];
-	uint16_t blk_cnt, last_blk;
+	void *cipher;
 	bool result;
-	size_t i, j;
-	int fd;
 
-	if (aad_len >= 0xff00) {
-		g_printerr("Unsupported AAD size");
-		return false;
+    bt_shell_printf("\rmesh_crypto_aes_ccm_encrypt\n");
+	cipher = l_aead_cipher_new(L_AEAD_CIPHER_AES_CCM, key, 16, mic_size);
+
+	result = l_aead_cipher_encrypt(cipher, msg, msg_len, aad, aad_len,
+					nonce, 13, out_msg, msg_len + mic_size);
+
+	if (result && out_mic) {
+		if (mic_size == 4)
+			*(uint32_t *)out_mic = l_get_be32(out_msg + msg_len);
+		else
+			*(uint64_t *)out_mic = l_get_be64(out_msg + msg_len);
 	}
 
-	fd = aes_ecb_setup(key);
-	if (fd < 0)
-		return false;
-
-	/* C_mic = e(AppKey, 0x01 || nonce || 0x0000) */
-	pmsg[0] = 0x01;
-	memcpy(pmsg + 1, nonce, 13);
-	put_be16(0x0000, pmsg + 14);
-
-	result = aes_ecb(fd, pmsg, cmic);
-	if (!result)
-		goto done;
-
-	/* X_0 = e(AppKey, 0x09 || nonce || length) */
-	if (mic_size == sizeof(uint64_t))
-		pmsg[0] = 0x19 | (aad_len ? 0x40 : 0x00);
-	else
-		pmsg[0] = 0x09 | (aad_len ? 0x40 : 0x00);
-
-	memcpy(pmsg + 1, nonce, 13);
-	put_be16(msg_len, pmsg + 14);
-
-	result = aes_ecb(fd, pmsg, Xn);
-	if (!result)
-		goto done;
-
-	/* If AAD is being used to authenticate, include it here */
-	if (aad_len) {
-		put_be16(aad_len, pmsg);
-
-		for (i = 0; i < sizeof(uint16_t); i++)
-			pmsg[i] = Xn[i] ^ pmsg[i];
-
-		j = 0;
-		aad_len += sizeof(uint16_t);
-		while (aad_len > 16) {
-			do {
-				pmsg[i] = Xn[i] ^ aad[j];
-				i++, j++;
-			} while (i < 16);
-
-			aad_len -= 16;
-			i = 0;
-
-			result = aes_ecb(fd, pmsg, Xn);
-			if (!result)
-				goto done;
-		}
-
-		for (i = 0; i < aad_len; i++, j++)
-			pmsg[i] = Xn[i] ^ aad[j];
-
-		for (i = aad_len; i < 16; i++)
-			pmsg[i] = Xn[i];
-
-		result = aes_ecb(fd, pmsg, Xn);
-		if (!result)
-			goto done;
-	}
-
-	last_blk = msg_len % 16;
-	blk_cnt = (msg_len + 15) / 16;
-	if (!last_blk)
-		last_blk = 16;
-
-	for (j = 0; j < blk_cnt; j++) {
-		if (j + 1 == blk_cnt) {
-			/* X_1 = e(AppKey, X_0 ^ Payload[0-15]) */
-			for (i = 0; i < last_blk; i++)
-				pmsg[i] = Xn[i] ^ msg[(j * 16) + i];
-			for (i = last_blk; i < 16; i++)
-				pmsg[i] = Xn[i] ^ 0x00;
-
-			result = aes_ecb(fd, pmsg, Xn);
-			if (!result)
-				goto done;
-
-			/* MIC = C_mic ^ X_1 */
-			for (i = 0; i < sizeof(mic); i++)
-				mic[i] = cmic[i] ^ Xn[i];
-
-			/* C_1 = e(AppKey, 0x01 || nonce || 0x0001) */
-			pmsg[0] = 0x01;
-			memcpy(pmsg + 1, nonce, 13);
-			put_be16(j + 1, pmsg + 14);
-
-			result = aes_ecb(fd, pmsg, cmsg);
-			if (!result)
-				goto done;
-
-			if (out_msg) {
-				/* Encrypted = Payload[0-15] ^ C_1 */
-				for (i = 0; i < last_blk; i++)
-					out_msg[(j * 16) + i] =
-						msg[(j * 16) + i] ^ cmsg[i];
-
-			}
-		} else {
-			/* X_1 = e(AppKey, X_0 ^ Payload[0-15]) */
-			for (i = 0; i < 16; i++)
-				pmsg[i] = Xn[i] ^ msg[(j * 16) + i];
-
-			result = aes_ecb(fd, pmsg, Xn);
-			if (!result)
-				goto done;
-
-			/* C_1 = e(AppKey, 0x01 || nonce || 0x0001) */
-			pmsg[0] = 0x01;
-			memcpy(pmsg + 1, nonce, 13);
-			put_be16(j + 1, pmsg + 14);
-
-			result = aes_ecb(fd, pmsg, cmsg);
-			if (!result)
-				goto done;
-
-			if (out_msg) {
-				/* Encrypted = Payload[0-15] ^ C_N */
-				for (i = 0; i < 16; i++)
-					out_msg[(j * 16) + i] =
-						msg[(j * 16) + i] ^ cmsg[i];
-			}
-
-		}
-	}
-
-	if (out_msg)
-		memcpy(out_msg + msg_len, mic, mic_size);
-
-	if (out_mic) {
-		switch (mic_size) {
-		case sizeof(uint32_t):
-			*(uint32_t *)out_mic = get_be32(mic);
-			break;
-		case sizeof(uint64_t):
-			*(uint64_t *)out_mic = get_be64(mic);
-			break;
-		default:
-			g_printerr("Unsupported MIC size");
-		}
-	}
-
-done:
-	aes_ecb_destroy(fd);
+	l_aead_cipher_free(cipher);
 
 	return result;
 }

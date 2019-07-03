@@ -313,7 +313,9 @@ tools_meshctl_SOURCES = tools/meshctl.c \
 				tools/mesh/onoff-model.h tools/mesh/onoff-model.c
 tools_meshctl_LDADD = gdbus/libgdbus-internal.la src/libshared-glib.la \
 				lib/libbluetooth-internal.la \
+				src/libshared-ell.la $(ell_ldadd) \
 				$(GLIB_LIBS) $(DBUS_LIBS) -ljson-c -lreadline
+tools_meshctl_DEPENDENCIES = $(ell_dependencies) src/libshared-ell.la
 endif
 
 EXTRA_DIST += tools/mesh/local_node.json tools/mesh/prov_db.json
